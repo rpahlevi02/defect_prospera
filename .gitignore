@@ -13,3 +13,7 @@ wheels/
 *.jpg
 *.jpeg
 *.png
+
+# model
+*.pt
+*.ckpt

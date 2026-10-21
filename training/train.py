@@ -52,7 +52,7 @@ class PatchCoreLoader:
     def _training(self):
         self.engine.fit(model=self.model, datamodule=self.datamodule)
 
-        self._export_onnx(self.engine)
+        self._export_torch(self.engine)
 
     def _export_onnx(self, engine):
         export_root = BASE_DIR / "training" / Path("models") / f"patchcore_{uuid.uuid4().hex[:8]}"
@@ -71,3 +71,15 @@ class PatchCoreLoader:
             export_type=ExportType.TORCH,
             export_root=export_root,
         )
+
+if __name__ == "__main__":
+    loader = PatchCoreLoader(
+        root_dir_name="bottle",
+        normal_dir="train/good",
+        abnormal_dir=None,
+        name="bottle_defect",
+        backbone="wide_resnet50_2",
+        layers=["layer2", "layer3"],
+        coreset_sampling_ratio=0.1,
+    )
+    loader._training()
