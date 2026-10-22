@@ -1,26 +1,9 @@
 from __future__ import annotations
-from dataclasses import dataclass, field
 from typing import Callable, Optional, Protocol
 import numpy as np
 import supervision as sv
-
-
-# ---------- common data type (map this to your own Detection schema if you have one) ----------
-@dataclass
-class Detections:
-    xyxy: np.ndarray                      # (N, 4) float32, pixels
-    conf: np.ndarray                      # (N,)
-    cls: np.ndarray                       # (N,) int
-    track_id: Optional[np.ndarray] = None  # (N,) int, set by the tracker
-    names: dict = field(default_factory=dict)
-
-    def __len__(self):
-        return len(self.xyxy)
-
-    @staticmethod
-    def empty():
-        return Detections(np.zeros((0, 4), np.float32), np.zeros(0, np.float32), np.zeros(0, int))
-
+import cv2
+from schema import Detections
 
 # ---------- ports ----------
 class Detector(Protocol):
@@ -51,23 +34,37 @@ class YoloDetector:
 
 
 class RFDetrDetector:
-    """size: nano | small | medium | base | large (depends on your rfdetr version)."""
-    def __init__(self, size="base", checkpoint=None, conf=0.4, optimize=True):
+    """seg=True loads a segmentation model. Class names vary between rfdetr versions."""
+    def __init__(self, size="small", seg=False, checkpoint=None, conf=0.4, optimize=True):
         import rfdetr
-        cls = getattr(rfdetr, f"RFDETR{size.capitalize()}")
+        if seg:
+            cls = getattr(rfdetr, f"RFDETRSeg{size.capitalize()}", None) or getattr(rfdetr, "RFDETRSegPreview")
+        else:
+            cls = getattr(rfdetr, f"RFDETR{size.capitalize()}")
         self.model = cls(pretrain_weights=checkpoint) if checkpoint else cls()
         if optimize and hasattr(self.model, "optimize_for_inference"):
             self.model.optimize_for_inference()
         self.conf = conf
 
     def __call__(self, frame_bgr):
-        sd = self.model.predict(frame_bgr[..., ::-1].copy(), threshold=self.conf)  # RGB in, sv.Detections out
+        H, W = frame_bgr.shape[:2]
+        sd = self.model.predict(frame_bgr[..., ::-1].copy(), threshold=self.conf)
         if len(sd) == 0:
             return Detections.empty()
+
+        masks = getattr(sd, "mask", None)
+        if masks is not None:
+            masks = masks.astype(bool)
+            if masks.shape[1:] != (H, W):          # normalize to frame size if needed
+                masks = np.stack([
+                    cv2.resize(m.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST).astype(bool)
+                    for m in masks
+                ])
         return Detections(
             sd.xyxy.astype(np.float32),
             sd.confidence.astype(np.float32),
             sd.class_id.astype(int),
+            masks=masks,
         )
 
 class RTDetrOnnxDetector:
@@ -156,46 +153,11 @@ class ByteTrackTracker:
             return Detections.empty()
         sd = sv.Detections(xyxy=dets.xyxy, confidence=dets.conf, class_id=dets.cls)
         out = self.t.update_with_detections(sd)
-        return Detections(out.xyxy, out.confidence, out.class_id, out.tracker_id, dets.names)
+        if len(out) == 0:
+            return Detections.empty()
 
-
-# ---------- trigger: fires once per track when its center crosses a line ----------
-class LineCrossTrigger:
-    def __init__(self, pos=0.5, axis=0, direction=0):
-        """pos: line position as fraction of frame width (axis=0) or height (axis=1).
-        direction: +1 / -1 to fire only one way, 0 for either."""
-        self.pos, self.axis, self.direction = pos, axis, direction
-        self.last = {}
-        self.fired = set()
-
-    def __call__(self, tid, box, frame_shape):
-        h, w = frame_shape[:2]
-        line = self.pos * (w if self.axis == 0 else h)
-        c = (box[0] + box[2]) / 2 if self.axis == 0 else (box[1] + box[3]) / 2
-        prev = self.last.get(tid)
-        self.last[tid] = c
-        if prev is None or tid in self.fired:
-            return False
-        crossed = (prev - line) * (c - line) < 0
-        if crossed and (self.direction == 0 or np.sign(c - prev) == self.direction):
-            self.fired.add(tid)
-            return True
-        return False
-
-    def prune(self, alive_ids):
-        alive = set(alive_ids)
-        self.last = {k: v for k, v in self.last.items() if k in alive}
-        if len(self.fired) > 5000:           # bound memory on long runs
-            self.fired = {k for k in self.fired if k in alive}
-
-
-# ---------- pipeline ----------
-def crop_box(frame, box, pad=0.1):
-    h, w = frame.shape[:2]
-    x1, y1, x2, y2 = box
-    px, py = (x2 - x1) * pad, (y2 - y1) * pad
-    x1, y1 = max(int(x1 - px), 0), max(int(y1 - py), 0)
-    x2, y2 = min(int(x2 + px), w), min(int(y2 + py), h)
-    return frame[y1:y2, x1:x2]
-
-
+        masks = None
+        if dets.masks is not None:
+            idx = sv.box_iou_batch(out.xyxy, dets.xyxy).argmax(1)   # output i came from input idx[i]
+            masks = dets.masks[idx]
+        return Detections(out.xyxy, out.confidence, out.class_id, out.tracker_id, dets.names, masks)
