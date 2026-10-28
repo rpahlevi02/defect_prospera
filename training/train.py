@@ -72,6 +72,72 @@ class PatchCoreLoader:
             export_root=export_root,
         )
 
+class ReverseDistillationLoader:
+    def __init__(
+        self,
+        # data loader
+        root_dir_name,
+        normal_dir="good",
+        abnormal_dir=None,
+        name=None,
+        batch_size=8,
+
+        # model params
+        backbone="wide_resnet50_2",
+        layers=("layer1", "layer2", "layer3"),
+        pre_trained=True,
+
+        # training params
+        max_epochs=200,
+    ):
+        from anomalib.models import ReverseDistillation
+
+        self.model = ReverseDistillation(
+            backbone=backbone,
+            layers=layers,
+            pre_trained=pre_trained,
+        )
+        self.engine = Engine(
+            accelerator="auto",
+            devices=1,
+            max_epochs=max_epochs,   # the decoder is gradient-trained, so it needs many epochs
+        )
+
+        self._load_data(
+            root_dir_name=root_dir_name,
+            normal_dir=normal_dir,
+            abnormal_dir=abnormal_dir,
+            name=name,
+            batch_size=batch_size,
+        )
+
+    def _load_data(self, root_dir_name, normal_dir="good", abnormal_dir=None, name=None, batch_size=8, num_workers=0):
+        if not name:
+            name = uuid.uuid4().hex[:8]
+
+        self.datamodule = Folder(
+            name=name,
+            root=BASE_DIR / "training/dataset" / root_dir_name,
+            normal_dir=normal_dir,
+            abnormal_dir=abnormal_dir,
+            train_batch_size=batch_size,
+            eval_batch_size=batch_size,
+            num_workers=num_workers
+        )
+
+    def _training(self, export_type=ExportType.TORCH):
+        self.engine.fit(model=self.model, datamodule=self.datamodule)
+        self._export(export_type)
+
+    def _export(self, export_type=ExportType.TORCH):
+        export_root = BASE_DIR / "training" / "models" / f"reverse_distillation_{uuid.uuid4().hex[:8]}"
+        self.engine.export(
+            model=self.model,
+            export_type=export_type,
+            export_root=export_root,
+        )
+        print("Exported to:", export_root)
+
 if __name__ == "__main__":
     loader = PatchCoreLoader(
         root_dir_name="bottle",
@@ -83,3 +149,14 @@ if __name__ == "__main__":
         coreset_sampling_ratio=0.1,
     )
     loader._training()
+
+    # loader = ReverseDistillationLoader(
+    #         root_dir_name="bottle",
+    #         normal_dir="train/good",
+    #         abnormal_dir=None,
+    #         name="bottle_defect",
+    #         backbone="wide_resnet50_2",
+    #         layers=("layer1", "layer2", "layer3"),
+    #         max_epochs=200,
+    #     )
+    # loader._training(ExportType.TORCH)
